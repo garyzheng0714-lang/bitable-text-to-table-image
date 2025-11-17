@@ -1,140 +1,500 @@
-import { basekit, FieldType, field, FieldComponent, FieldCode, NumberFormatter, AuthorizationType } from '@lark-opdev/block-basekit-server-api';
+import { basekit, FieldType, field, FieldComponent, FieldCode } from '@lark-opdev/block-basekit-server-api';
+import { TosClient } from '@volcengine/tos-sdk';
 const { t } = field;
 
-const feishuDm = ['feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com'];
+const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'htmlcsstoimage.com', '0x0.st'];
 // 通过addDomainList添加请求接口的域名，不可写多个addDomainList，否则会被覆盖
-basekit.addDomainList([...feishuDm, 'api.exchangerate-api.com',]);
+basekit.addDomainList(feishuDm);
 
 basekit.addField({
   // 定义捷径的i18n语言资源
   i18n: {
     messages: {
       'zh-CN': {
-        'rmb': '人民币金额',
-        'usd': '美元金额',
-        'rate': '汇率',
+        'textInput': '待生成的文本字段',
+        'tableImage': '表格图片',
+        'attachment': '附件',
+        'parseError': '文本格式错误，请使用格式：# header: 列1 | 列2 | 列3',
       },
       'en-US': {
-        'rmb': 'RMB Amount',
-        'usd': 'Dollar amount',
-        'rate': 'Exchange Rate',
-      },
-      'ja-JP': {
-        'rmb': '人民元の金額',
-        'usd': 'ドル金額',
-        'rate': '為替レート',
+        'textInput': 'Source Text Field',
+        'tableImage': 'Table Image',
+        'attachment': 'Attachment',
+        'parseError': 'Text format error, please use format: # header: col1 | col2 | col3',
       },
     }
   },
   // 定义捷径的入参
   formItems: [
     {
-      key: 'account',
-      label: t('rmb'),
+      key: 'accessKeyId',
+      label: 'AccessKeyId',
+      component: FieldComponent.Input,
+      props: {
+        placeholder: '请输入 AccessKeyId',
+      },
+      validator: { required: true }
+    },
+    {
+      key: 'accessKeySecret',
+      label: 'AccessKeySecret',
+      component: FieldComponent.Input,
+      props: {
+        placeholder: '请输入 AccessKeySecret',
+      },
+      validator: { required: true }
+    },
+    {
+      key: 'bucket',
+      label: 'Bucket',
+      component: FieldComponent.Input,
+      props: {
+        placeholder: '请输入 Bucket 名称',
+      },
+      validator: { required: true }
+    },
+    {
+      key: 'region',
+      label: 'Region',
+      component: FieldComponent.Input,
+      props: {
+        placeholder: '例如 cn-beijing',
+      },
+      validator: { required: true }
+    },
+    {
+      key: 'sourceTextField',
+      label: t('textInput'),
       component: FieldComponent.FieldSelect,
       props: {
-        supportType: [FieldType.Number],
+        supportType: [FieldType.Text],
       },
-      validator: {
-        required: true,
-      }
+      validator: { required: true }
     },
   ],
   // 定义捷径的返回结果类型
   resultType: {
-    type: FieldType.Object,
-    extra: {
-      icon: {
-        light: 'https://lf3-static.bytednsdoc.com/obj/eden-cn/eqgeh7upeubqnulog/chatbot.svg',
-      },
-      properties: [
-        {
-          key: 'id',
-          isGroupByKey: true,
-          type: FieldType.Text,
-          label: 'id',
-          hidden: true,
-        },
-        {
-          key: 'usd',
-          type: FieldType.Number,
-          label: t('usd'),
-          primary: true,
-          extra: {
-            formatter: NumberFormatter.DIGITAL_ROUNDED_2,
-          }
-        },
-        {
-          key: 'rate',
-          type: FieldType.Number,
-          label: t('rate'),
-          extra: {
-            formatter: NumberFormatter.DIGITAL_ROUNDED_4,
-          }
-        },
-      ],
-    },
+    type: FieldType.Attachment,
   },
-  // formItemParams 为运行时传入的字段参数，对应字段配置里的 formItems （如引用的依赖字段）
-  execute: async (formItemParams: { account: number }, context) => {
-    const { account = 0 } = formItemParams;
+  // formItemParams 为运行时传入的字段参数，对应字段配置里的 formItems
+  execute: async (formItemParams: { accessKeyId: string; accessKeySecret: string; bucket: string; region: string; sourceTextField: any }, context) => {
+    const { accessKeyId = '', accessKeySecret = '', bucket = '', region = '', sourceTextField = '' } = formItemParams;
+    
     /** 为方便查看日志，使用此方法替代console.log */
     function debugLog(arg: any) {
-      // @ts-ignore
       console.log(JSON.stringify({
         formItemParams,
         context,
         arg
       }))
     }
-    try {
-      const resText: any = await context.fetch('https://api.exchangerate-api.com/v4/latest/CNY', { // 已经在addDomainList中添加为白名单的请求
-        method: 'GET',
-      }).then(res => res.text()); // 不要直接res.json()，这非常容易报错，且难以排查
 
-      // 请避免使用 debugLog(res) 这类方式输出日志，因为所查到的日志是没有顺序的，为方便排查错误，对每个log进行手动标记顺序
-      debugLog({
-        '===1 接口返回结果': resText
+    try {
+      const input = normalizeTextContent(sourceTextField);
+      const lines = input.trim().split('\n');
+      if (lines.length < 2) {
+        return { code: FieldCode.Error };
+      }
+
+      // 解析标题行
+      const headerLine = lines[0];
+      if (!headerLine.startsWith('# header:')) {
+        return { code: FieldCode.Error };
+      }
+
+      const headerText = headerLine.replace('# header:', '').trim();
+      const headers = headerText.split('|').map(h => h.trim());
+      
+      // 解析数据行
+      const dataRows = lines.slice(1).map(line => {
+        return line.split('|').map(cell => cell.trim());
       });
 
-      const res = JSON.parse(resText);
-      const usdRate = res?.rates?.['USD'];
+      debugLog({
+        '===1 解析结果': { headers, dataRows }
+      });
 
+      // 生成HTML表格
+      const tableHtml = generateTableHTML(headers, dataRows);
       
-      return {
-        code: FieldCode.Success,
-        data: {
-          id: `${Math.random()}`,
-          usd: parseFloat((account * usdRate).toFixed(4)),
-          rate: usdRate,
+      debugLog({
+        '===2 生成的HTML': tableHtml
+      });
+
+      const svg = generateSVGFromTable(headers, normalizedRowsForSvg(headers, dataRows));
+      const svgBuffer = Buffer.from(svg, 'utf-8');
+      const fileName = `table_${Date.now()}.svg`;
+
+      if (!accessKeyId || !accessKeySecret || !bucket || !region) {
+        return { code: FieldCode.ConfigError };
+      }
+
+      const tosUrl = await uploadToTOS(svgBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region });
+      if (tosUrl) {
+        return {
+          code: FieldCode.Success,
+          data: [
+            { url: tosUrl, name: fileName }
+          ]
         }
       }
 
-      /*
-        如果错误原因明确，想要向使用者传递信息，要避免直接报错，可将错误信息当作成功结果返回：
+      return { code: FieldCode.Error };
 
-      return {
-        code: FieldCode.Success,
-        data: {
-          id: `具体错误原因`,
-          usd: 0,
-          rate: 0,
-        }
-      }
-
-      */
     } catch (e) {
       console.log('====error', String(e));
       debugLog({
         '===999 异常错误': String(e)
       });
-      /** 返回非 Success 的错误码，将会在单元格上显示报错，请勿返回msg、message之类的字段，它们并不会起作用。
-       * 对于未知错误，请直接返回 FieldCode.Error，然后通过查日志来排查错误原因。
-       */
+      
       return {
         code: FieldCode.Error,
       }
     }
   },
 });
+
+function normalizeTextContent(value: any): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value.map((v) => {
+      if (typeof v === 'string') return v;
+      if (v && typeof v === 'object' && 'text' in v) return String((v as any).text ?? '');
+      return '';
+    }).join('');
+  }
+  if (value && typeof value === 'object' && 'text' in value) return String((value as any).text ?? '');
+  return '';
+}
+
+/**
+ * 生成表格HTML
+ */
+function generateTableHTML(headers: string[], dataRows: string[][]): string {
+  const maxCols = headers.length;
+  
+  // 确保所有行都有相同数量的列
+  const normalizedRows = dataRows.map(row => {
+    const normalizedRow = [...row];
+    while (normalizedRow.length < maxCols) {
+      normalizedRow.push('');
+    }
+    return normalizedRow.slice(0, maxCols);
+  });
+
+  // 计算列宽（基于字符长度）
+  const colWidths = headers.map((header, index) => {
+    let maxWidth = header.length;
+    normalizedRows.forEach(row => {
+      maxWidth = Math.max(maxWidth, (row[index] || '').length);
+    });
+    return Math.max(maxWidth * 12, 80); // 最小宽度80px，每个字符大约12px
+  });
+
+  // 生成HTML
+  let html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; background: #ffffff; padding: 20px;">
+      <table style="border-collapse: collapse; width: auto; margin: 0 auto; background: #ffffff;">
+        <thead>
+          <tr style="background: #f8f9fa;">
+  `;
+
+  // 表头
+  headers.forEach((header, index) => {
+    html += `
+      <th style="
+        padding: 12px 16px;
+        text-align: center;
+        font-weight: 600;
+        color: #374151;
+        border-top: 1px solid #e5e7eb;
+        border-left: 1px solid #e5e7eb;
+        border-right: 1px solid #e5e7eb;
+        border-bottom: 2px solid #dbe2ea;
+        min-width: ${colWidths[index]}px;
+        font-size: 14px;
+      ">${header}</th>
+    `;
+  });
+
+  html += `
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  // 数据行
+  normalizedRows.forEach((row, rowIndex) => {
+    html += `
+      <tr style="${rowIndex % 2 === 0 ? 'background: #ffffff;' : 'background: #f9fafb;'}">
+    `;
+    
+    row.forEach((cell, colIndex) => {
+      html += `
+        <td style="
+          padding: 10px 16px;
+          text-align: center;
+          color: #6b7280;
+          border: 1px solid #e5e7eb;
+          font-size: 13px;
+        ">${cell || ''}</td>
+      `;
+    });
+    
+    html += `
+      </tr>
+    `;
+  });
+
+  html += `
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  return html;
+}
+
+function normalizedRowsForSvg(headers: string[], dataRows: string[][]): string[][] {
+  const maxCols = headers.length;
+  return dataRows.map(row => {
+    const r = [...row];
+    while (r.length < maxCols) r.push('');
+    return r.slice(0, maxCols);
+  });
+}
+
+/**
+ * 生成表格图片
+ */
+async function generateTableImage(html: string, context: any): Promise<string> {
+  // 使用htmlcsstoimage API生成图片
+  const apiUrl = 'https://htmlcsstoimage.com/api/v1/image';
+  
+  try {
+    const response = await context.fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        html,
+        css: '',
+        width: 800,
+        quality: 88,
+        format: 'png'
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Image generation failed: ${response.status}`);
+    }
+
+    const imageBuffer = await response.arrayBuffer();
+    
+    // 转换为base64
+    const base64Image = Buffer.from(imageBuffer).toString('base64');
+    return `data:image/png;base64,${base64Image}`;
+    
+  } catch (error) {
+    console.log('====image_error', String(error));
+    
+    // 备用方案：生成简单的SVG表格
+    return generateSVGTable(html);
+  }
+}
+
+ 
+
+/**
+ * 生成SVG表格（备用方案）
+ */
+function generateSVGTable(html: string): string {
+  // 简化的SVG表格生成，实际使用时需要更复杂的解析
+  const svg = `
+    <svg width="600" height="400" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="white"/>
+      <text x="50%" y="50%" text-anchor="middle" dy=".3em" font-family="Arial, sans-serif" font-size="14" fill="#666">
+        Table image generation in progress...
+      </text>
+    </svg>
+  `;
+  
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}
+
+function generateSVGFromTable(headers: string[], rows: string[][]): string {
+  const colWidths = headers.map((h, i) => {
+    let maxLen = h.length;
+    rows.forEach(r => { maxLen = Math.max(maxLen, (r[i] || '').length); });
+    return Math.max(maxLen * 12, 80);
+  });
+  const colX = colWidths.reduce<number[]>((acc, w, idx) => {
+    const x = idx === 0 ? 0 : acc[idx - 1] + colWidths[idx - 1];
+    acc.push(x);
+    return acc;
+  }, []);
+  const tableWidth = colWidths.reduce((a, b) => a + b, 0);
+  const rowHeight = 40;
+  const headerHeight = 44;
+  const bodyHeight = rows.length * rowHeight;
+  const padding = 24;
+  const width = tableWidth + padding * 2;
+  const height = headerHeight + bodyHeight + padding * 2 + 16;
+  const borderColor = '#e5e7eb';
+  const headerText = '#374151';
+  const bodyText = '#6b7280';
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">`;
+  svg += `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`;
+
+  const startY = padding;
+  // Header background
+  svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight}" fill="#f8f9fa" stroke="${borderColor}" stroke-width="1"/>`;
+  // Header bottom line thicker
+  svg += `<line x1="${padding}" y1="${startY + headerHeight}" x2="${padding + tableWidth}" y2="${startY + headerHeight}" stroke="#dbe2ea" stroke-width="2"/>`;
+
+  // Header texts
+  headers.forEach((h, i) => {
+    const x = padding + colX[i] + colWidths[i] / 2;
+    const y = startY + headerHeight / 2 + 5;
+    svg += `<text x="${x}" y="${y}" text-anchor="middle" font-family="-apple-system, PingFang SC, Arial, sans-serif" font-size="14" font-weight="600" fill="${headerText}">${escapeXml(h)}</text>`;
+    // vertical separators
+    if (i > 0) {
+      const sx = padding + colX[i];
+      svg += `<line x1="${sx}" y1="${startY}" x2="${sx}" y2="${startY + headerHeight + bodyHeight}" stroke="${borderColor}" stroke-width="1"/>`;
+    }
+  });
+
+  // Body rows
+  rows.forEach((r, ri) => {
+    const y = startY + headerHeight + ri * rowHeight;
+    // row separator
+    svg += `<line x1="${padding}" y1="${y}" x2="${padding + tableWidth}" y2="${y}" stroke="${borderColor}" stroke-width="1"/>`;
+    r.forEach((cell, ci) => {
+      const x = padding + colX[ci] + colWidths[ci] / 2;
+      const cy = y + rowHeight / 2 + 5;
+      svg += `<text x="${x}" y="${cy}" text-anchor="middle" font-family="-apple-system, PingFang SC, Arial, sans-serif" font-size="13" font-weight="400" fill="${bodyText}">${escapeXml(cell || '')}</text>`;
+    });
+  });
+
+  // outer border
+  svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight + bodyHeight}" fill="none" stroke="${borderColor}" stroke-width="1"/>`;
+  svg += `</svg>`;
+  return svg;
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] as string));
+}
+
+async function uploadToFeishuDrive(buffer: Buffer, fileName: string, folderToken: string | undefined, context: any): Promise<string | null> {
+  try {
+    const size = buffer.length;
+    const boundary = `----trae-boundary-${Date.now()}-${Math.random().toString().slice(2)}`;
+    const CRLF = '\r\n';
+
+    const parts: Buffer[] = [];
+    function pushField(name: string, value: string) {
+      parts.push(Buffer.from(`--${boundary}${CRLF}`));
+      parts.push(Buffer.from(`Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}`));
+      parts.push(Buffer.from(`${value}${CRLF}`));
+    }
+    function pushFile(name: string, filename: string, mime: string, data: Buffer) {
+      parts.push(Buffer.from(`--${boundary}${CRLF}`));
+      parts.push(Buffer.from(`Content-Disposition: form-data; name="${name}"; filename="${filename}"${CRLF}`));
+      parts.push(Buffer.from(`Content-Type: ${mime}${CRLF}${CRLF}`));
+      parts.push(data);
+      parts.push(Buffer.from(CRLF));
+    }
+
+    pushField('file_name', fileName);
+    pushField('parent_type', 'explorer');
+    if (folderToken) pushField('parent_node', folderToken);
+    pushField('size', String(size));
+    pushFile('file', fileName, 'image/svg+xml', buffer);
+    parts.push(Buffer.from(`--${boundary}--${CRLF}`));
+
+    const body = Buffer.concat(parts);
+
+    const headers: Record<string, string> = {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    };
+    const envToken = process.env.FEISHU_TENANT_ACCESS_TOKEN || process.env.TENANT_ACCESS_TOKEN || '';
+    if (envToken) headers['Authorization'] = `Bearer ${envToken}`;
+
+    const res = await context.fetch('https://open.feishu.cn/open-apis/drive/v1/files/upload_all', {
+      method: 'POST',
+      headers,
+      body,
+    });
+    const text = await res.text();
+    const json = JSON.parse(text || '{}');
+    const token = json?.data?.file_token || json?.data?.data?.file_token || json?.data?.data?.token;
+    if (json?.code === 0 && token) {
+      return token as string;
+    }
+    console.log('====upload_error', text);
+    return null;
+  } catch (e) {
+    console.log('====upload_exception', String(e));
+    return null;
+  }
+}
+
+async function uploadToPublicStorage(buffer: Buffer, fileName: string, context: any): Promise<string | null> {
+  try {
+    const boundary = `----trae-boundary-${Date.now()}-${Math.random().toString().slice(2)}`;
+    const CRLF = '\r\n';
+    const parts: Buffer[] = [];
+    function pushFile(name: string, filename: string, mime: string, data: Buffer) {
+      parts.push(Buffer.from(`--${boundary}${CRLF}`));
+      parts.push(Buffer.from(`Content-Disposition: form-data; name="${name}"; filename="${filename}"${CRLF}`));
+      parts.push(Buffer.from(`Content-Type: ${mime}${CRLF}${CRLF}`));
+      parts.push(data);
+      parts.push(Buffer.from(CRLF));
+    }
+    pushFile('file', fileName, 'image/svg+xml', buffer);
+    parts.push(Buffer.from(`--${boundary}--${CRLF}`));
+    const body = Buffer.concat(parts);
+
+    const res = await context.fetch('https://0x0.st', {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body,
+    });
+    const text = await res.text();
+    const url = (text || '').trim();
+    if (url.startsWith('http')) return url;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+type TosCred = { accessKeyId: string; accessKeySecret: string; bucket: string; region: string };
+
+function normalizeRegion(r: string): { region: string; endpoint: string; host: string } {
+  const raw = (r || '').trim().toLowerCase();
+  const region = raw.replace(/^tos-/, '').replace(/^oss-/, '');
+  const endpoint = `https://tos-${region}.volces.com`;
+  const host = `tos-${region}.volces.com`;
+  return { region, endpoint, host };
+}
+
+async function uploadToTOS(buffer: Buffer, fileName: string, cred: TosCred): Promise<string | null> {
+  try {
+    const n = normalizeRegion(cred.region);
+    const client = new TosClient({ accessKeyId: cred.accessKeyId, accessKeySecret: cred.accessKeySecret, region: n.region, endpoint: n.endpoint });
+    const key = `table_images/${fileName}`;
+    await client.putObject({ bucket: cred.bucket, key, body: buffer, contentType: 'image/svg+xml' });
+    const url = `https://${cred.bucket}.${n.host}/${key}`;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 export default basekit;

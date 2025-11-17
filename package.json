@@ -15,6 +15,7 @@
     "@lark-opdev/block-basekit-cli": "1.0.5"
   },
   "dependencies": {
-    "@lark-opdev/block-basekit-server-api": "1.0.6"
+    "@lark-opdev/block-basekit-server-api": "1.0.6",
+    "@volcengine/tos-sdk": "^2.7.5"
   }
 }
