@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@lark-opdev/block-basekit-server-api": "1.0.6",
-    "@volcengine/tos-sdk": "^2.7.5",
-    "sharp": "^0.34.5"
+    "@resvg/resvg-js": "^2.6.2",
+    "@volcengine/tos-sdk": "^2.7.5"
   }
 }

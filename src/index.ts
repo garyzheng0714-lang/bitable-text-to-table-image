@@ -1,6 +1,6 @@
 import { basekit, FieldType, field, FieldComponent, FieldCode } from '@lark-opdev/block-basekit-server-api';
 import { TosClient } from '@volcengine/tos-sdk';
-import sharp from 'sharp';
+import { Resvg } from '@resvg/resvg-js';
 const { t } = field;
 
 const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'htmlcsstoimage.com', '0x0.st'];
@@ -106,10 +106,12 @@ basekit.addField({
       const headerText = headerLine.replace('# header:', '').trim();
       const headers = headerText.split('|').map(h => h.trim());
       
-      // 解析数据行
-      const dataRows = lines.slice(1).map(line => {
-        return line.split('|').map(cell => cell.trim());
-      });
+      // 解析数据行，删除空行
+      const dataRows = lines.slice(1)
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .map(line => line.split('|').map(cell => cell.trim()))
+        .filter(row => row.some(cell => cell.length > 0));
 
       debugLog({
         '===1 解析结果': { headers, dataRows }
@@ -302,31 +304,21 @@ function dataUrlToBuffer(dataUrl: string): Buffer {
 }
 
 async function renderOptimizedImage(html: string, headers: string[], rows: string[][], width: number, context: any): Promise<Buffer> {
-  const dataUrl = await generateTableImage(html, width, context);
-  const isPNG = /^data:image\/png;base64,/.test(dataUrl);
-  const isSVG = /^data:image\/svg\+xml;base64,/.test(dataUrl);
-  if (isPNG) {
-    const png = dataUrlToBuffer(dataUrl);
-    const webp = await sharp(png).webp({ quality: 82, nearLossless: true, smartSubsample: true }).toBuffer();
-    return webp;
-  }
-  const svg = isSVG ? Buffer.from(dataUrl.split(',')[1], 'base64') : Buffer.from(generateSVGFromTable(headers, rows), 'utf-8');
-  const webp = await sharp(svg).webp({ quality: 82, nearLossless: true, smartSubsample: true }).toBuffer();
-  return webp;
+  return renderTablePNG(headers, rows);
 }
 
 async function renderTableWebP(headers: string[], rows: string[][]): Promise<Buffer> {
   const svg = generateRichSVG(headers, rows);
-  const buf = Buffer.from(svg, 'utf-8');
-  const webp = await sharp(buf, { density: 168 }).webp({ quality: 84, nearLossless: true, smartSubsample: true }).toBuffer();
-  return webp;
+  const resvg = new Resvg(svg, { background: 'white', fitTo: { mode: 'zoom', value: 2 } });
+  const rendered = resvg.render();
+  return Buffer.from(rendered.asPng());
 }
 
 async function renderTablePNG(headers: string[], rows: string[][]): Promise<Buffer> {
   const svg = generateRichSVG(headers, rows);
-  const buf = Buffer.from(svg, 'utf-8');
-  const png = await sharp(buf, { density: 240 }).png({ compressionLevel: 9, palette: true, colors: 64 }).toBuffer();
-  return png;
+  const resvg = new Resvg(svg, { background: 'white', fitTo: { mode: 'zoom', value: 2 } });
+  const rendered = resvg.render();
+  return Buffer.from(rendered.asPng());
 }
 
  
@@ -360,8 +352,8 @@ function estimateTextPixels(s: string): number {
 }
 
 function computeColumnWidths(headers: string[], rows: string[][]): number[] {
-  const minWidth = 140;
-  const maxWidth = 600;
+  const minWidth = 160;
+  const maxWidth = 720;
   return headers.map((h, i) => {
     const headerPx = estimateTextPixels(h) + 28;
     let cellMax = 0;
@@ -447,10 +439,10 @@ function generateRichSVG(headers: string[], rows: string[][]): string {
   }, []);
   const tableWidth = colWidths.reduce((a, b) => a + b, 0);
   const padding = 24;
-  const headerFont = 14;
-  const bodyFont = 13;
-  const headerLine = 18;
-  const bodyLine = 17;
+  const headerFont = 16;
+  const bodyFont = 14;
+  const headerLine = 20;
+  const bodyLine = 18;
   const horizPad = 14;
   const vertPadHeader = 12;
   const vertPadBody = 10;
@@ -480,14 +472,14 @@ function generateRichSVG(headers: string[], rows: string[][]): string {
     svg += `<text x="${cx}" y="${baseY}" text-anchor="middle" font-family="-apple-system, PingFang SC, Arial, sans-serif" font-size="${headerFont}" font-weight="600" fill="${headerText}">${escapeXml(line)}</text>`;
     if (i > 0) {
       const sx = padding + colX[i];
-      svg += `<line x1="${sx}" y1="${startY}" x2="${sx}" y2="${startY + headerHeight + bodyHeight}" stroke="${borderColor}" stroke-width="1"/>`;
+      svg += `<line x1="${sx}" y1="${startY}" x2="${sx}" y2="${startY + headerHeight + bodyHeight}" stroke="${borderColor}" stroke-width="1.25"/>`;
     }
   });
 
   let yCursor = startY + headerHeight;
   rows.forEach((r, ri) => {
     const rh = rowHeights[ri];
-    svg += `<line x1="${padding}" y1="${yCursor}" x2="${padding + tableWidth}" y2="${yCursor}" stroke="${borderColor}" stroke-width="1"/>`;
+    svg += `<line x1="${padding}" y1="${yCursor}" x2="${padding + tableWidth}" y2="${yCursor}" stroke="${borderColor}" stroke-width="1.25"/>`;
     r.forEach((cell, ci) => {
       const cx = padding + colX[ci] + colWidths[ci] / 2;
       const lines = rowLines[ri][ci];
@@ -501,7 +493,7 @@ function generateRichSVG(headers: string[], rows: string[][]): string {
     yCursor += rh;
   });
 
-  svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight + bodyHeight}" fill="none" stroke="${borderColor}" stroke-width="1"/>`;
+  svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight + bodyHeight}" fill="none" stroke="${borderColor}" stroke-width="1.25"/>`;
   svg += `</svg>`;
   return svg;
 }
