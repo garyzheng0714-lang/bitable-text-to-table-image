@@ -1,5 +1,6 @@
 import { basekit, FieldType, field, FieldComponent, FieldCode } from '@lark-opdev/block-basekit-server-api';
 import { TosClient } from '@volcengine/tos-sdk';
+import sharp from 'sharp';
 const { t } = field;
 
 const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'htmlcsstoimage.com', '0x0.st'];
@@ -121,15 +122,14 @@ basekit.addField({
         '===2 生成的HTML': tableHtml
       });
 
-      const svg = generateSVGFromTable(headers, normalizedRowsForSvg(headers, dataRows));
-      const svgBuffer = Buffer.from(svg, 'utf-8');
-      const fileName = `table_${Date.now()}.svg`;
+      const pngBuffer = await renderTablePNG(headers, normalizedRowsForSvg(headers, dataRows));
+      const fileName = `table_${Date.now()}.png`;
 
       if (!accessKeyId || !accessKeySecret || !bucket || !region) {
         return { code: FieldCode.ConfigError };
       }
 
-      const tosUrl = await uploadToTOS(svgBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region });
+      const tosUrl = await uploadToTOS(pngBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region }, 'image/png');
       if (tosUrl) {
         return {
           code: FieldCode.Success,
@@ -265,7 +265,7 @@ function normalizedRowsForSvg(headers: string[], dataRows: string[][]): string[]
 /**
  * 生成表格图片
  */
-async function generateTableImage(html: string, context: any): Promise<string> {
+async function generateTableImage(html: string, width: number, context: any): Promise<string> {
   // 使用htmlcsstoimage API生成图片
   const apiUrl = 'https://htmlcsstoimage.com/api/v1/image';
   
@@ -275,13 +275,7 @@ async function generateTableImage(html: string, context: any): Promise<string> {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        html,
-        css: '',
-        width: 800,
-        quality: 88,
-        format: 'png'
-      })
+      body: JSON.stringify({ html, css: '', width, quality: 88, format: 'png' })
     });
 
     if (!response.ok) {
@@ -297,9 +291,42 @@ async function generateTableImage(html: string, context: any): Promise<string> {
   } catch (error) {
     console.log('====image_error', String(error));
     
-    // 备用方案：生成简单的SVG表格
     return generateSVGTable(html);
   }
+}
+
+function dataUrlToBuffer(dataUrl: string): Buffer {
+  const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || '');
+  if (!m) return Buffer.alloc(0);
+  return Buffer.from(m[2], 'base64');
+}
+
+async function renderOptimizedImage(html: string, headers: string[], rows: string[][], width: number, context: any): Promise<Buffer> {
+  const dataUrl = await generateTableImage(html, width, context);
+  const isPNG = /^data:image\/png;base64,/.test(dataUrl);
+  const isSVG = /^data:image\/svg\+xml;base64,/.test(dataUrl);
+  if (isPNG) {
+    const png = dataUrlToBuffer(dataUrl);
+    const webp = await sharp(png).webp({ quality: 82, nearLossless: true, smartSubsample: true }).toBuffer();
+    return webp;
+  }
+  const svg = isSVG ? Buffer.from(dataUrl.split(',')[1], 'base64') : Buffer.from(generateSVGFromTable(headers, rows), 'utf-8');
+  const webp = await sharp(svg).webp({ quality: 82, nearLossless: true, smartSubsample: true }).toBuffer();
+  return webp;
+}
+
+async function renderTableWebP(headers: string[], rows: string[][]): Promise<Buffer> {
+  const svg = generateRichSVG(headers, rows);
+  const buf = Buffer.from(svg, 'utf-8');
+  const webp = await sharp(buf, { density: 168 }).webp({ quality: 84, nearLossless: true, smartSubsample: true }).toBuffer();
+  return webp;
+}
+
+async function renderTablePNG(headers: string[], rows: string[][]): Promise<Buffer> {
+  const svg = generateRichSVG(headers, rows);
+  const buf = Buffer.from(svg, 'utf-8');
+  const png = await sharp(buf, { density: 240 }).png({ compressionLevel: 9, palette: true, colors: 64 }).toBuffer();
+  return png;
 }
 
  
@@ -319,6 +346,35 @@ function generateSVGTable(html: string): string {
   `;
   
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}
+
+function estimateTextPixels(s: string): number {
+  let px = 0;
+  for (const ch of String(s)) {
+    const code = ch.charCodeAt(0);
+    if (code <= 0x7f) px += 8;
+    else if (code <= 0xffff) px += 14;
+    else px += 16;
+  }
+  return Math.max(80, px);
+}
+
+function computeColumnWidths(headers: string[], rows: string[][]): number[] {
+  const minWidth = 140;
+  const maxWidth = 600;
+  return headers.map((h, i) => {
+    const headerPx = estimateTextPixels(h) + 28;
+    let cellMax = 0;
+    rows.forEach(r => { cellMax = Math.max(cellMax, estimateTextPixels(r[i] || '')); });
+    const want = Math.max(headerPx, cellMax);
+    return Math.max(minWidth, Math.min(maxWidth, Math.ceil(want)));
+  });
+}
+
+function formatCellContent(cell: string): string {
+  const v = cell || '';
+  if (/^https?:\/\//.test(v)) return `<a href="${v}" target="_blank">${v}</a>`;
+  return v;
 }
 
 function generateSVGFromTable(headers: string[], rows: string[][]): string {
@@ -380,6 +436,103 @@ function generateSVGFromTable(headers: string[], rows: string[][]): string {
   svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight + bodyHeight}" fill="none" stroke="${borderColor}" stroke-width="1"/>`;
   svg += `</svg>`;
   return svg;
+}
+
+function generateRichSVG(headers: string[], rows: string[][]): string {
+  const colWidths = computeColumnWidths(headers, rows);
+  const colX = colWidths.reduce<number[]>((acc, w, idx) => {
+    const x = idx === 0 ? 0 : acc[idx - 1] + colWidths[idx - 1];
+    acc.push(x);
+    return acc;
+  }, []);
+  const tableWidth = colWidths.reduce((a, b) => a + b, 0);
+  const padding = 24;
+  const headerFont = 14;
+  const bodyFont = 13;
+  const headerLine = 18;
+  const bodyLine = 17;
+  const horizPad = 14;
+  const vertPadHeader = 12;
+  const vertPadBody = 10;
+  const borderColor = '#e5e7eb';
+  const headerText = '#374151';
+  const bodyText = '#6b7280';
+
+  const headerLines = headers.map((h) => [String(h || '')]);
+  const headerHeight = Math.max(44, vertPadHeader * 2 + headerLine);
+
+  const rowLines: string[][][] = rows.map(r => r.map((cell, i) => wrapText(cell || '', colWidths[i] - horizPad * 2, bodyFont)));
+  const rowHeights = rowLines.map(cells => Math.max(40, vertPadBody * 2 + Math.max(...cells.map(ls => ls.length)) * bodyLine));
+  const bodyHeight = rowHeights.reduce((a, b) => a + b, 0);
+  const width = tableWidth + padding * 2;
+  const height = headerHeight + bodyHeight + padding * 2 + 16;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" shape-rendering="crispEdges" text-rendering="geometricPrecision">`;
+  svg += `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`;
+  const startY = padding;
+  svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight}" fill="#f8f9fa" stroke="${borderColor}" stroke-width="1"/>`;
+  svg += `<line x1="${padding}" y1="${startY + headerHeight}" x2="${padding + tableWidth}" y2="${startY + headerHeight}" stroke="#dbe2ea" stroke-width="2"/>`;
+
+  headers.forEach((h, i) => {
+    const cx = padding + colX[i] + colWidths[i] / 2;
+    const baseY = startY + headerHeight / 2 + headerLine * 0.3;
+    const line = headerLines[i][0];
+    svg += `<text x="${cx}" y="${baseY}" text-anchor="middle" font-family="-apple-system, PingFang SC, Arial, sans-serif" font-size="${headerFont}" font-weight="600" fill="${headerText}">${escapeXml(line)}</text>`;
+    if (i > 0) {
+      const sx = padding + colX[i];
+      svg += `<line x1="${sx}" y1="${startY}" x2="${sx}" y2="${startY + headerHeight + bodyHeight}" stroke="${borderColor}" stroke-width="1"/>`;
+    }
+  });
+
+  let yCursor = startY + headerHeight;
+  rows.forEach((r, ri) => {
+    const rh = rowHeights[ri];
+    svg += `<line x1="${padding}" y1="${yCursor}" x2="${padding + tableWidth}" y2="${yCursor}" stroke="${borderColor}" stroke-width="1"/>`;
+    r.forEach((cell, ci) => {
+      const cx = padding + colX[ci] + colWidths[ci] / 2;
+      const lines = rowLines[ri][ci];
+      const ch = lines.length * bodyLine;
+      const baseY = yCursor + rh / 2 - ch / 2 + bodyLine * 0.8;
+      lines.forEach((line, li) => {
+        const y = baseY + li * bodyLine;
+        svg += `<text x="${cx}" y="${y}" text-anchor="middle" font-family="-apple-system, PingFang SC, Arial, sans-serif" font-size="${bodyFont}" font-weight="400" fill="${bodyText}">${escapeXml(line)}</text>`;
+      });
+    });
+    yCursor += rh;
+  });
+
+  svg += `<rect x="${padding}" y="${startY}" width="${tableWidth}" height="${headerHeight + bodyHeight}" fill="none" stroke="${borderColor}" stroke-width="1"/>`;
+  svg += `</svg>`;
+  return svg;
+}
+
+function wrapText(text: string, maxWidthPx: number, fontPx: number): string[] {
+  const lines: string[] = [];
+  const src = String(text || '').split(/\n/);
+  src.forEach(part => {
+    let acc = '';
+    let cur = 0;
+    for (const ch of part) {
+      const w = estimateCharPx(ch, fontPx);
+      if (cur + w > maxWidthPx && acc) {
+        lines.push(acc);
+        acc = ch;
+        cur = w;
+      } else {
+        acc += ch;
+        cur += w;
+      }
+    }
+    lines.push(acc);
+  });
+  return lines.length ? lines : [''];
+}
+
+function estimateCharPx(ch: string, fontPx: number): number {
+  const code = ch.charCodeAt(0);
+  if (code <= 0x7f) return Math.max(7, Math.floor(fontPx * 0.6));
+  if (code <= 0xffff) return Math.max(12, Math.floor(fontPx * 1.0));
+  return Math.max(12, Math.floor(fontPx * 1.1));
 }
 
 function escapeXml(s: string): string {
@@ -482,12 +635,12 @@ function normalizeRegion(r: string): { region: string; endpoint: string; host: s
   return { region, endpoint, host };
 }
 
-async function uploadToTOS(buffer: Buffer, fileName: string, cred: TosCred): Promise<string | null> {
+async function uploadToTOS(buffer: Buffer, fileName: string, cred: TosCred, contentType?: string): Promise<string | null> {
   try {
     const n = normalizeRegion(cred.region);
     const client = new TosClient({ accessKeyId: cred.accessKeyId, accessKeySecret: cred.accessKeySecret, region: n.region, endpoint: n.endpoint });
     const key = `table_images/${fileName}`;
-    await client.putObject({ bucket: cred.bucket, key, body: buffer, contentType: 'image/svg+xml' });
+    await client.putObject({ bucket: cred.bucket, key, body: buffer, contentType: contentType || 'application/octet-stream' });
     const url = `https://${cred.bucket}.${n.host}/${key}`;
     return url;
   } catch (e) {
