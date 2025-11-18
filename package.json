@@ -17,6 +17,7 @@
   "dependencies": {
     "@lark-opdev/block-basekit-server-api": "1.0.6",
     "@resvg/resvg-js": "^2.6.2",
-    "@volcengine/tos-sdk": "^2.7.5"
+    "@volcengine/tos-sdk": "^2.7.5",
+    "ali-oss": "^6.23.0"
   }
 }

@@ -1,9 +1,25 @@
 import { basekit, FieldType, field, FieldComponent, FieldCode } from '@lark-opdev/block-basekit-server-api';
 import { TosClient } from '@volcengine/tos-sdk';
+import OSS from 'ali-oss';
+
+const storageRadio: any = {
+  key: 'storage',
+  label: '存储服务',
+  component: FieldComponent.Radio,
+  props: {
+    options: [
+      { value: 'OSS', label: '阿里云OSS' },
+      { value: 'TOS', label: '火山引擎TOS' }
+    ],
+    placeholder: '请选择存储服务'
+  },
+  defaultValue: 'OSS',
+  validator: { required: true }
+};
 import { Resvg } from '@resvg/resvg-js';
 const { t } = field;
 
-const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'htmlcsstoimage.com', '0x0.st'];
+const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'aliyuncs.com', 'volces.com'];
 // 通过addDomainList添加请求接口的域名，不可写多个addDomainList，否则会被覆盖
 basekit.addDomainList(feishuDm);
 
@@ -27,6 +43,7 @@ basekit.addField({
   },
   // 定义捷径的入参
   formItems: [
+    storageRadio,
     {
       key: 'accessKeyId',
       label: 'AccessKeyId',
@@ -78,8 +95,8 @@ basekit.addField({
     type: FieldType.Text,
   },
   // formItemParams 为运行时传入的字段参数，对应字段配置里的 formItems
-  execute: async (formItemParams: { accessKeyId: string; accessKeySecret: string; bucket: string; region: string; sourceTextField: any }, context) => {
-    const { accessKeyId = '', accessKeySecret = '', bucket = '', region = '', sourceTextField = '' } = formItemParams;
+  execute: async (formItemParams: { storage?: any; accessKeyId: string; accessKeySecret: string; bucket: string; region: string; sourceTextField: any }, context) => {
+    const { storage, accessKeyId = '', accessKeySecret = '', bucket = '', region = '', sourceTextField = '' } = formItemParams;
     
     /** 为方便查看日志，使用此方法替代console.log */
     function debugLog(arg: any) {
@@ -131,7 +148,10 @@ basekit.addField({
         return { code: FieldCode.ConfigError };
       }
 
-      const tosUrl = await uploadToTOS(pngBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region }, 'image/png');
+      const useOSS = isOSSSelected(storage);
+      const tosUrl = useOSS
+        ? await uploadToOSS(pngBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region }, 'image/png')
+        : await uploadToTOS(pngBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region }, 'image/png');
       if (tosUrl) {
         return {
           code: FieldCode.Success,
@@ -618,6 +638,17 @@ async function uploadToPublicStorage(buffer: Buffer, fileName: string, context: 
 }
 
 type TosCred = { accessKeyId: string; accessKeySecret: string; bucket: string; region: string };
+type OssCred = { accessKeyId: string; accessKeySecret: string; bucket: string; region: string };
+
+function isOSSSelected(storage: any): boolean {
+  if (storage == null) return true;
+  if (typeof storage === 'string') return storage === 'OSS' || storage === '阿里云OSS' || /OSS/i.test(storage);
+  if (typeof storage === 'object') {
+    const v = (storage?.value ?? storage?.name ?? '').toString();
+    return v === 'OSS' || v === '阿里云OSS' || /OSS/i.test(v);
+  }
+  return false;
+}
 
 function normalizeRegion(r: string): { region: string; endpoint: string; host: string } {
   const raw = (r || '').trim().toLowerCase();
@@ -637,6 +668,28 @@ async function uploadToTOS(buffer: Buffer, fileName: string, cred: TosCred, cont
     return url;
   } catch (e) {
     console.log('====tos_upload_error', String(e));
+    return null;
+  }
+}
+
+function normalizeOssRegion(r: string): { region: string; endpoint: string; host: string } {
+  const raw = (r || '').trim().toLowerCase();
+  const region = raw.replace(/^oss-/, '').replace(/^tos-/, '');
+  const endpoint = `oss-${region}.aliyuncs.com`;
+  const host = `oss-${region}.aliyuncs.com`;
+  return { region, endpoint, host };
+}
+
+async function uploadToOSS(buffer: Buffer, fileName: string, cred: OssCred, contentType?: string): Promise<string | null> {
+  try {
+    const n = normalizeOssRegion(cred.region);
+    const client = new OSS({ region: `oss-${n.region}`, accessKeyId: cred.accessKeyId, accessKeySecret: cred.accessKeySecret, bucket: cred.bucket, endpoint: `https://${n.endpoint}` });
+    const key = `table_images/${fileName}`;
+    await client.put(key, buffer, { headers: { 'Content-Type': contentType || 'application/octet-stream' } });
+    const url = `https://${cred.bucket}.${n.host}/${key}`;
+    return url;
+  } catch (e) {
+    console.log('====oss_upload_error', String(e));
     return null;
   }
 }
