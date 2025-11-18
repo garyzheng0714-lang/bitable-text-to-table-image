@@ -74,7 +74,7 @@ basekit.addField({
   ],
   // 定义捷径的返回结果类型
   resultType: {
-    type: FieldType.Attachment,
+    type: FieldType.Text,
   },
   // formItemParams 为运行时传入的字段参数，对应字段配置里的 formItems
   execute: async (formItemParams: { accessKeyId: string; accessKeySecret: string; bucket: string; region: string; sourceTextField: any }, context) => {
@@ -133,9 +133,7 @@ basekit.addField({
       if (tosUrl) {
         return {
           code: FieldCode.Success,
-          data: [
-            { url: tosUrl, name: fileName }
-          ]
+          data: tosUrl
         }
       }
 
@@ -479,7 +477,7 @@ type TosCred = { accessKeyId: string; accessKeySecret: string; bucket: string; r
 function normalizeRegion(r: string): { region: string; endpoint: string; host: string } {
   const raw = (r || '').trim().toLowerCase();
   const region = raw.replace(/^tos-/, '').replace(/^oss-/, '');
-  const endpoint = `https://tos-${region}.volces.com`;
+  const endpoint = `tos-${region}.volces.com`;
   const host = `tos-${region}.volces.com`;
   return { region, endpoint, host };
 }
@@ -492,7 +490,8 @@ async function uploadToTOS(buffer: Buffer, fileName: string, cred: TosCred): Pro
     await client.putObject({ bucket: cred.bucket, key, body: buffer, contentType: 'image/svg+xml' });
     const url = `https://${cred.bucket}.${n.host}/${key}`;
     return url;
-  } catch {
+  } catch (e) {
+    console.log('====tos_upload_error', String(e));
     return null;
   }
 }
