@@ -30,10 +30,10 @@ const processSelect: any = {
   defaultValue: 'TEXT_TABLE_IMAGE',
   validator: { required: true }
 };
-import { Resvg } from '@resvg/resvg-js';
+ 
 const { t } = field;
 
-const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'internal-api-drive-stream.feishu.cn', 'aliyuncs.com', 'volces.com'];
+const feishuDm = ['feishu.cn', 'open.feishu.cn', 'feishucdn.com', 'larksuitecdn.com', 'larksuite.com', 'internal-api-drive-stream.feishu.cn', 'aliyuncs.com', 'volces.com', 'htmlcsstoimage.com'];
 // 通过addDomainList添加请求接口的域名，不可写多个addDomainList，否则会被覆盖
 basekit.addDomainList(feishuDm);
 
@@ -126,8 +126,7 @@ basekit.addField({
     /** 为方便查看日志，使用此方法替代console.log */
     function debugLog(arg: any) {
       console.log(JSON.stringify({
-        formItemParams,
-        context,
+        safe: { storage, bucket, region, processType },
         arg
       }))
     }
@@ -198,17 +197,19 @@ basekit.addField({
       debugLog({ '===1 解析结果': { headers, dataRows } });
       const tableHtml = generateTableHTML(headers, dataRows);
       debugLog({ '===2 生成的HTML': tableHtml });
-      const pngBuffer = await renderTablePNG(headers, normalizedRowsForSvg(headers, dataRows));
-      debugLog({ '===3 渲染PNG': { byteLength: pngBuffer?.length || 0 } });
+      const pngBuffer = await renderTablePNG(headers, normalizedRowsForSvg(headers, dataRows), context);
+      const ts = `-${Date.now()}`;
       const baseNameRaw = normalizeSingleSelectValue(nameField);
       const baseName = sanitizeFileName(baseNameRaw);
-      const ts = `-${Date.now()}`;
       const fileName = baseName ? appendTimestamp(ensureExt(baseName, '.png'), ts) : `table-${Date.now()}.png`;
       if (!accessKeyId || !accessKeySecret || !bucket || !region) {
         return { code: FieldCode.ConfigError };
       }
       const useOSS = isOSSSelected(storage);
       debugLog({ '===4 上传参数': { useOSS, fileName, bucket, region } });
+      if (!pngBuffer || pngBuffer.length === 0) {
+        return { code: FieldCode.Error };
+      }
       const url = useOSS
         ? await uploadToOSS(pngBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region }, 'image/png')
         : await uploadToTOS(pngBuffer, fileName, { accessKeyId, accessKeySecret, bucket, region }, 'image/png');
@@ -574,22 +575,30 @@ async function renderOptimizedImage(html: string, headers: string[], rows: strin
   return renderTablePNG(headers, rows);
 }
 
-async function renderTableWebP(headers: string[], rows: string[][]): Promise<Buffer> {
+async function renderTablePNG(headers: string[], rows: string[][], context?: any): Promise<Buffer> {
   const svg = generateRichSVG(headers, rows);
-  const resvg = new Resvg(svg, { background: 'white', fitTo: { mode: 'zoom', value: 2 } });
-  const rendered = resvg.render();
-  return Buffer.from(rendered.asPng());
+  try {
+    const mod = require('@resvg/resvg-js');
+    const ResvgCtor = mod?.Resvg || mod?.default?.Resvg || mod?.default;
+    if (ResvgCtor) {
+      const resvg = new ResvgCtor(svg, { background: 'white', fitTo: { mode: 'zoom', value: 2 } });
+      const rendered = resvg.render();
+      return Buffer.from(rendered.asPng());
+    }
+    throw new Error('resvg_unavailable');
+  } catch (e) {
+    try {
+      if (context) {
+        const html = generateTableHTML(headers, rows);
+        const width = computeColumnWidths(headers, rows).reduce((a, b) => a + b, 0) + 48;
+        const dataUrl = await generateTableImage(html, width, context);
+        const buf = dataUrlToBuffer(dataUrl);
+        if (buf && buf.length > 0) return buf;
+      }
+    } catch {}
+    return Buffer.alloc(0);
+  }
 }
-
-async function renderTablePNG(headers: string[], rows: string[][]): Promise<Buffer> {
-  const svg = generateRichSVG(headers, rows);
-  const resvg = new Resvg(svg, { background: 'white', fitTo: { mode: 'zoom', value: 2 } });
-  const rendered = resvg.render();
-  return Buffer.from(rendered.asPng());
-}
-
- 
-
 /**
  * 生成SVG表格（备用方案）
  */
